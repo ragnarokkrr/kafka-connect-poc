@@ -1,8 +1,9 @@
 # Connector Reference — PoC1
 
-Detailed reference for the two connectors used in this PoC: the Debezium
-PostgreSQL CDC source and the Debezium JDBC sink. Covers every config property,
-the Kafka message format, and how the sink interprets source events.
+Detailed reference for the three connectors used in this PoC: the Debezium
+PostgreSQL CDC source, the Debezium Outbox source (with EventRouter SMT), and
+the Debezium JDBC sink. Covers every config property, the Kafka message format,
+and how each connector transforms data.
 
 ---
 
@@ -243,7 +244,179 @@ the key entirely.
 
 ---
 
-## 2. Sink: Debezium JDBC
+## 2. Source: Debezium Outbox (EventRouter)
+
+**Config file:** `connectors/source-debezium-outbox.json`
+**Connector class:** `io.debezium.connector.postgresql.PostgresConnector`
+
+This connector uses the same Debezium PostgreSQL source but is configured
+specifically for the transactional outbox pattern. The EventRouter SMT
+transforms raw CDC events from the `inventory.outbox` table into clean
+domain events routed to topic-per-aggregate-type.
+
+### Config properties
+
+| Property | Value | Description |
+|---|---|---|
+| `connector.class` | `io.debezium.connector.postgresql.PostgresConnector` | Same Debezium Postgres connector as CDC |
+| `database.hostname` | `source-db` | Docker service name of the source Postgres |
+| `database.port` | `5432` | Postgres port inside the Docker network |
+| `database.user` | `postgres` | Database user (needs replication privileges) |
+| `database.password` | `postgres` | Database password |
+| `database.dbname` | `source` | Database to capture changes from |
+| `topic.prefix` | `poc1-outbox` | Prefix for internal Debezium topics (not the routed event topics) |
+| `table.include.list` | `inventory.outbox` | Only capture the outbox table |
+| `plugin.name` | `pgoutput` | Logical decoding plugin |
+| `slot.name` | `debezium_outbox` | Separate replication slot from CDC connector |
+| `publication.name` | `dbz_outbox_publication` | Separate publication from CDC connector |
+| `publication.autocreate.mode` | `filtered` | Auto-create publication scoped to outbox table only |
+| `tombstones.on.delete` | `false` | Outbox rows are never deleted by consumers; no tombstones needed |
+
+### EventRouter SMT properties
+
+| Property | Value | Description |
+|---|---|---|
+| `transforms` | `outbox` | Name of the transform chain (single transform in this case) |
+| `transforms.outbox.type` | `io.debezium.transforms.outbox.EventRouter` | The Debezium Outbox EventRouter SMT |
+| `transforms.outbox.route.by.field` | `aggregatetype` | Column that determines the target topic |
+| `transforms.outbox.route.topic.replacement` | `outbox.event.${routedByValue}` | Topic pattern; `${routedByValue}` is replaced by `aggregatetype` value |
+| `transforms.outbox.table.field.event.id` | `id` | Column used as the event ID (for deduplication) |
+| `transforms.outbox.table.field.event.key` | `aggregateid` | Column used as the Kafka record key |
+| `transforms.outbox.table.field.event.payload` | `payload` | Column containing the event payload (becomes the record value) |
+| `transforms.outbox.table.fields.additional.placement` | `type:header:eventType` | Place `type` column value in Kafka header `eventType` |
+
+### Converters
+
+| Property | Value | Description |
+|---|---|---|
+| `key.converter` | `StringConverter` | Record key is a plain string (the `aggregateid`) |
+| `value.converter` | `StringConverter` | Record value is a plain string (the JSON `payload`) |
+
+Unlike the CDC connector, the outbox connector uses `StringConverter` because
+the EventRouter extracts just the `aggregateid` and `payload` values — no
+schema wrapper is needed.
+
+### Topic naming
+
+The EventRouter routes each event to a topic based on the `aggregatetype` column:
+
+| `aggregatetype` value | Target topic |
+|---|---|
+| `Order` | `outbox.event.Order` |
+| `Customer` | `outbox.event.Customer` |
+| `Shipment` | `outbox.event.Shipment` |
+
+The `poc1-outbox` prefix is only used for internal Debezium topics (offsets,
+schema history). Routed events go to `outbox.event.<aggregatetype>`.
+
+### Outbox table schema
+
+The connector expects this table structure (defined in `sql/source-init.sql`):
+
+```sql
+CREATE TABLE inventory.outbox (
+    id            uuid         NOT NULL PRIMARY KEY DEFAULT gen_random_uuid(),
+    aggregatetype varchar(255) NOT NULL,  -- determines target topic
+    aggregateid   varchar(255) NOT NULL,  -- becomes Kafka record key
+    type          varchar(255) NOT NULL,  -- event type, placed in header
+    payload       jsonb,                  -- becomes Kafka record value
+    created_at    timestamptz  NOT NULL DEFAULT now()
+);
+```
+
+### Reading messages with kcat
+
+Outbox messages are plain strings (no schema wrapper), making them simpler
+to consume:
+
+```bash
+# Read all events from Order aggregate topic
+docker exec kcat kcat -b kafka:9092 -t outbox.event.Order -C -e
+
+# Pretty-print JSON payloads
+docker exec kcat kcat -b kafka:9092 -t outbox.event.Order -C -e | jq .
+
+# Show key and value together
+docker exec kcat kcat -b kafka:9092 -t outbox.event.Order -C -e -K ': '
+
+# Show headers (includes eventType)
+docker exec kcat kcat -b kafka:9092 -t outbox.event.Order -C -e -f 'Key: %k\nHeaders: %h\nValue: %s\n---\n'
+```
+
+### Kafka record structure
+
+#### Record key
+
+Plain string containing the `aggregateid` value:
+
+```
+order-123
+```
+
+#### Record value
+
+Plain JSON string containing the `payload` column value:
+
+```json
+{
+  "orderId": "order-123",
+  "customerId": "cust-456",
+  "items": [
+    {"sku": "WIDGET-A", "qty": 2},
+    {"sku": "GADGET-B", "qty": 1}
+  ],
+  "total": 150.00
+}
+```
+
+#### Record headers
+
+| Header | Source | Example value |
+|---|---|---|
+| `eventType` | `type` column | `OrderCreated` |
+| `id` | `id` column (UUID) | `550e8400-e29b-41d4-a716-446655440000` |
+
+### Transformation flow
+
+```
+inventory.outbox row                          Kafka message
+────────────────────                          ─────────────
+
+id:            550e8400-...       ───────►    header: id = "550e8400-..."
+aggregatetype: Order              ───────►    topic: outbox.event.Order
+aggregateid:   order-123          ───────►    key: "order-123"
+type:          OrderCreated       ───────►    header: eventType = "OrderCreated"
+payload:       {"orderId":...}    ───────►    value: {"orderId":...}
+created_at:    2026-01-30T...                 (not included in message)
+```
+
+### Why use the Outbox pattern?
+
+1. **Transactional consistency** — The outbox row is inserted in the same
+   transaction as the business data change. Either both succeed or both fail.
+
+2. **Decoupling** — Applications don't need Kafka client libraries. They just
+   write to a database table.
+
+3. **Clean event schema** — The EventRouter strips away the Debezium envelope,
+   producing events with just the domain payload.
+
+4. **Topic-per-aggregate** — Events are automatically routed to the correct
+   topic based on the aggregate type, enabling per-aggregate consumers.
+
+### Comparison with CDC connector
+
+| Aspect | CDC Connector | Outbox Connector |
+|---|---|---|
+| Captures | All changes to `inventory.orders` | Only inserts to `inventory.outbox` |
+| Message format | Debezium envelope with `before`/`after` | Clean domain event (just payload) |
+| Record key | Primary key struct with schema | Plain aggregate ID string |
+| Topic naming | `poc1.inventory.orders` (table-based) | `outbox.event.<aggregatetype>` (field-based) |
+| Use case | Data replication, audit log | Domain event publishing |
+
+---
+
+## 3. Sink: Debezium JDBC
 
 **Config file:** `connectors/sink-jdbc-orders.json`
 **Connector class:** `io.debezium.connector.jdbc.JdbcSinkConnector`
