@@ -1,0 +1,114 @@
+services:
+  source-db:
+    image: postgres:16
+    container_name: source-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: source
+    command: ["-c", "wal_level=logical"]
+    ports:
+      - "5432:5432"
+    volumes:
+      - source-db-data:/var/lib/postgresql/data
+      - ./sql/source-init.sql:/docker-entrypoint-initdb.d/source-init.sql:ro
+    networks:
+      - poc1
+
+  sink-db:
+    image: postgres:16
+    container_name: sink-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: sink
+    ports:
+      - "5433:5432"
+    volumes:
+      - sink-db-data:/var/lib/postgresql/data
+      - ./sql/sink-init.sql:/docker-entrypoint-initdb.d/sink-init.sql:ro
+    networks:
+      - poc1
+
+  kafka:
+    image: apache/kafka:4.0.0
+    container_name: kafka
+    environment:
+      # KRaft combined mode (broker + controller in one process)
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      # Listeners
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # Single-node — replication factor 1
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      # Cluster ID (static, fine for local dev)
+      CLUSTER_ID: poc1-kafka-cluster-id-01
+    ports:
+      - "9092:9092"
+    networks:
+      - poc1
+
+  kafka-connect:
+    image: quay.io/debezium/connect:3.2
+    container_name: kafka-connect
+    depends_on:
+      - kafka
+      - source-db
+      - sink-db
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: poc1-connect-cluster
+      CONFIG_STORAGE_TOPIC: _connect-configs
+      OFFSET_STORAGE_TOPIC: _connect-offsets
+      STATUS_STORAGE_TOPIC: _connect-status
+      CONFIG_STORAGE_REPLICATION_FACTOR: "1"
+      OFFSET_STORAGE_REPLICATION_FACTOR: "1"
+      STATUS_STORAGE_REPLICATION_FACTOR: "1"
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "true"
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "true"
+    ports:
+      - "8083:8083"
+    networks:
+      - poc1
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    depends_on:
+      - kafka
+      - kafka-connect
+    environment:
+      KAFKA_CLUSTERS_0_NAME: poc1
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: poc1-connect
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://kafka-connect:8083
+    ports:
+      - "8080:8080"
+    networks:
+      - poc1
+
+  kcat:
+    image: edenhill/kcat:1.7.1
+    container_name: kcat
+    depends_on:
+      - kafka
+    entrypoint: ["/bin/sh", "-c", "while :; do sleep 2147483647; done"]
+    networks:
+      - poc1
+
+volumes:
+  source-db-data:
+  sink-db-data:
+
+networks:
+  poc1:
+    driver: bridge

@@ -1,0 +1,20 @@
+{
+  "name": "sink-jdbc-orders",
+  "config": {
+    "connector.class": "io.debezium.connector.jdbc.JdbcSinkConnector",
+    "connection.url": "jdbc:postgresql://sink-db:5432/sink",
+    "connection.username": "postgres",
+    "connection.password": "postgres",
+    "topics": "poc1.inventory.orders",
+    "insert.mode": "upsert",
+    "primary.key.mode": "record_key",
+    "primary.key.fields": "id",
+    "delete.enabled": "true",
+    "schema.evolution": "none",
+    "table.name.format": "inventory.orders",
+    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter.schemas.enable": "true",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "true"
+  }
+}
