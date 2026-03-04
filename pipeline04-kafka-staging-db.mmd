@@ -1,0 +1,14 @@
+flowchart LR
+  A[Ingress DB] --> B[Custom Kafka Connect Source <br/> change events]
+  B --> C[contentReference - oaicite0 - index=0 <br/> raw.cdc.* topics]
+
+  C --> D[Validate + Normalize <br/> optional Streams/ksqlDB]
+  D -->|bad| X[DLQ topic + error table]
+  D -->|good| E[stg.* topics - conformed]
+
+  E --> F[Sink to Intermediate Postgres <br/> staging tables]
+  F --> G[SQL transforms / dbt / stored procs <br/> 3–10 min schedule]
+  G --> H[Final Postgres <br/> target tables]
+
+  C -. replay/backfill .-> D
+  F -. audit/reconcile .-> G

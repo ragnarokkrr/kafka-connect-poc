@@ -1,0 +1,19 @@
+flowchart LR
+  A[Sources<br/>DBs • APIs • Files • Events] --> B[Ingestion<br/>Batch • CDC • Streaming]
+  B --> C[Raw Landing Zone<br/>Object Storage or Raw Topics<br/>Immutable]
+  C --> D[Validation & Quality Gates<br/>Schema • DQ checks]
+  D -->|Pass| E[Transform<br/>ETL or ELT]
+  D -->|Fail| X[Quarantine / DLQ<br/>Error bucket • DLQ topic]
+
+  E --> F[Curated Layers<br/>Bronze → Silver → Gold]
+  F --> G[Serving / Targets<br/>Warehouse • Marts • Read Models • Feature Store]
+  G --> H[Consumers<br/>BI • Apps • ML • APIs]
+
+  O[Orchestration<br/>Schedules • Retries • Backfills] -.-> B
+  O -.-> E
+  M[Observability<br/>Freshness • Lag • Errors • Lineage] -.-> B
+  M -.-> E
+  M -.-> G
+  S[Governance & Security<br/>PII • ACLs • Retention] -.-> C
+  S -.-> F
+  S -.-> G

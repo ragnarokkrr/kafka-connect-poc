@@ -1,0 +1,7 @@
+flowchart LR
+  STG[stg.* topics<br/> conformed CDC events] --> KS[Kafka Streams Promote App<br/>validate • dedupe • order • latest-wins]
+  KS --> FINAL[final.* topics<br/>promote-ready]
+  FINAL -->|preferred| SINK[JDBC Sink Connector]
+  SINK --> PG[(Final Postgres)]
+
+  KS -->|optional| DLQ[dlq.promote.* topics]

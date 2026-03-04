@@ -1,0 +1,14 @@
+flowchart LR
+  SDB[Source DB<br/>Postgres/MySQL/SQL Server] --> CDC[CDC Capture<br/>Reads WAL/binlog]
+  CDC --> KRAW[Kafka Raw CDC Topics<br/>Append-only change log]
+
+  KRAW --> VAL[Validate<br/>Schema • required fields]
+  VAL -->|Fail| DLQ[DLQ Topic]
+  VAL -->|Pass| XFORM[Transform optional<br/>Unwrap • Map • Dedupe • Handle deletes]
+
+  XFORM --> SINK[Sink Writer<br/>Upserts/Inserts/Deletes]
+  SINK --> TDB[Target Postgres<br/>Tables / Read Model]
+
+  RPL[Replay/Backfill<br/>Reprocess from raw topics] --> KRAW
+  OBS[Observe<br/>Connector health • lag • errors • deadlocks] -.-> CDC
+  OBS -.-> SINK

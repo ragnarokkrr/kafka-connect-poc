@@ -1,0 +1,15 @@
+flowchart LR
+  P[Producers<BR/>Services • Apps • Devices] --> T[Kafka Topics<BR/>Raw Domain Events]
+  T --> V[Validation<BR/>Schema checks • invariants]
+  V -->|Fail| DLQ[DLQ Topic]
+  V -->|Pass| SP[Stream Processing<BR/>Enrich • Join • Window • Dedupe]
+
+  SP --> CT[Curated Topics<BR/>Conformed / Gold]
+  CT --> C1[Consumers<BR/>Other services]
+  CT --> C2[Analytics Sink<BR/>Lake/Warehouse loader]
+  SP --> RM[Operational Read Models<BR/>Postgres • Redis • Search]
+
+  OBS[Observe<BR/>Lag • Throughput • DLQ volume • E2E latency] -.-> T
+  OBS -.-> SP
+  ACL[Govern<BR/>ACLs • PII redaction • retention] -.-> T
+  ACL -.-> CT
